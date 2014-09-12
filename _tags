@@ -1,0 +1,4 @@
+<oplay.ml{,i}>: package(tsdl,unix)
+<oplay.{byte,native}>: package(tsdl,unix)
+
+true: debug
