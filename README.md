@@ -22,19 +22,22 @@ like `qcif`, `vga`, `720p`(see stdsizes.ml for all supported).
 
 The format is one of `yuy2`, `uyvy`, `yvyu`, `yv12`, `iyuv`, `420`.
 
+If a `file` is not provided it is read from stdin.  In this case
+only stepping and playing is supported.
+
 ### Keys
 
-* `escape` quite
+* `escape` quit
 * `space`, `return` play/stop
 * `tab` toggle full screen
 * `right`, `left` step one frame forward/backward
 * `home`, `end` go to first/last frame
-* `1`-`9` go `n`\*10% into the file
+* `1`-`9` go _n\*10%_ into the file
+* `g` draw 16x16 grid
+* `d` cycle difference mode
+* `y` cycle colour plane
 
 ### TODO
 
-* Planar 422 support
-* File diff support
-* Show individual colour planes
-* Grid overlay
+* Strange behaviour when selecting different colour planes/diffs.
 

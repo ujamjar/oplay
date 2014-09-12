@@ -1,4 +1,5 @@
 open Tsdl
+open Printf
 
 module YuvFormat = struct
 
@@ -33,6 +34,18 @@ end
 module Arg = 
 struct 
 
+  type diff_mode = NoDiff | OtherFile | ExactDiff | Diff
+  let next_diff_mode = function
+    | NoDiff -> OtherFile
+    | OtherFile -> ExactDiff
+    | ExactDiff -> Diff
+    | Diff -> NoDiff
+  type plane_mode = All | Y | U | V
+  let next_plane_mode = function
+    | All -> Y
+    | Y -> U
+    | U -> V
+    | V -> All
   module Cfg = 
   struct
     let in_file = ref "" 
@@ -45,6 +58,9 @@ struct
     let auto422 = ref false
     let framerate = ref 30
     let fullscreen = ref false
+    let grid = ref false
+    let diff_mode = ref NoDiff
+    let show_plane = ref All
     let verbose = ref false 
   end
 
@@ -100,10 +116,36 @@ struct
       begin
         Cfg.widtho := !Cfg.width;
         Cfg.heighto := !Cfg.height;
+      end;
+    if !Cfg.diff_file <> "" then 
+      begin
+        Cfg.diff_mode := ExactDiff
       end
+
+  let print_opts () = 
+    if !Cfg.verbose = true then
+      begin
+        fprintf stderr "in-file: %s\n" !Cfg.in_file;
+        fprintf stderr "diff-file: %s\n" !Cfg.diff_file;
+        fprintf stderr "size-in: %dx%d\n" !Cfg.width !Cfg.height;
+        fprintf stderr "size-out: %dx%d\n" !Cfg.widtho !Cfg.heighto;
+        fprintf stderr "format: %s\n" (YuvFormat.string_of_format !Cfg.format);
+        fprintf stderr "framerate: %d\n" !Cfg.framerate;
+        fprintf stderr "fullscreen: %b\n" !Cfg.fullscreen;
+        flush stderr
+      end
+
+  (* parse commandline *)
+  let _ = 
+    parse args;
+    print_opts ()
+
 end
 
 open Arg
+
+type ba = (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
+type ba2 = (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array2.t
 
 module FileIO = 
 struct
@@ -111,13 +153,8 @@ struct
   open Unix.LargeFile
 
   type file = 
-    | UnixFile of Unix.file_descr * 
-                  (int,
-                   Bigarray.int8_unsigned_elt,Bigarray.c_layout) Bigarray.Array2.t *
-                  int
-    | CamlFile of in_channel *
-                  (int,
-                   Bigarray.int8_unsigned_elt,Bigarray.c_layout) Bigarray.Array1.t 
+    | UnixFile of Unix.file_descr * ba2 * int
+    | CamlFile of in_channel * ba
 
   let frame_size w h fmt = 
     if YuvFormat.is_planar fmt then w * h * 3 / 2
@@ -128,7 +165,6 @@ struct
     let length = (Unix.LargeFile.stat name).st_size in
     let size = frame_size !Cfg.width !Cfg.height !Cfg.format in
     let num_frames = Int64.to_int (Int64.div length (Int64.of_int size)) in
-    Printf.printf "%Li %i %i\n" length size num_frames;
     (* open file *)
     let f = open_in_bin name in
     let f = Unix.descr_of_in_channel f in
@@ -158,29 +194,6 @@ struct
     with 
     | _ -> failwith ("Failed to open file " ^ name)
 
-  let copy422_to_yuy2 f t = 
-    let width, height = !Cfg.width, !Cfg.height in
-    for y=0 to height-1 do
-      let h = width * y in
-      for x=0 to width - 1 do
-        t.{(h*2) + (x*2)} <- f.{h + x}
-      done
-    done;
-    let c = width * height in
-    for y=0 to height-1 do
-      let h = width / 2 * y in
-      for x=0 to width/2 - 1 do
-        t.{(h*4) + (x*4) + 1} <- f.{c + h + x}
-      done
-    done;
-    let c = c + (width * height / 2) in
-    for y=0 to height-1 do
-      let h = width / 2 * y in
-      for x=0 to width/2 - 1 do
-        t.{(h*4) + (x*4) + 3} <- f.{c + h + x}
-      done
-    done
-
   let read_file file frame_no = 
     match file with
     | UnixFile(f,b,s) -> begin
@@ -193,22 +206,190 @@ struct
       rd 0;
       b
 
+  let read_file_opt file frame_no = 
+    match file with
+    | None -> None
+    | Some(file) -> Some(read_file file frame_no)
+
 end
 
-open Printf
+module Transform = struct
 
-let print_opts () = 
-  if !Cfg.verbose = true then
-    begin
-      fprintf stderr "in-file: %s\n" !Cfg.in_file;
-      fprintf stderr "diff-file: %s\n" !Cfg.diff_file;
-      fprintf stderr "size-in: %dx%d\n" !Cfg.width !Cfg.height;
-      fprintf stderr "size-out: %dx%d\n" !Cfg.widtho !Cfg.heighto;
-      fprintf stderr "format: %s\n" (YuvFormat.string_of_format !Cfg.format);
-      fprintf stderr "framerate: %d\n" !Cfg.framerate;
-      fprintf stderr "fullscreen: %b\n" !Cfg.fullscreen;
-      flush stderr
+  let get_buffer (f:ba) (t:ba option ref) =
+    match !t with
+    | Some(b) -> b
+    | None ->
+      let size = Bigarray.Array1.dim f in
+      let b =  Bigarray.(Array1.create int8_unsigned c_layout size) in
+      t := Some b;
+      b
+
+  let rec loop x lim step f = 
+    if x <= lim then begin
+      f x;
+      loop (x+step) lim step f
     end
+
+  let off_pixel_420_planar flip = 
+    let w = !Cfg.width in
+    let h = !Cfg.height in
+    let ou = w * h in
+    let ov = ou + (w * h / 4) in
+    let ou,ov = if flip then ov,ou else ou,ov in
+    (fun x y -> (      x    +  (y*w)       )),
+    (fun x y -> (ou + (x/2) + ((y/2)*(w/2)))),
+    (fun x y -> (ov + (x/2) + ((y/2)*(w/2))))
+
+  let off_pixel_422_packed oy ou ov = 
+    let w = !Cfg.width in
+    (fun x y -> ( (x*2)    + (y*w*2) + oy)),
+    (fun x y -> (((x/2)*4) + (y*w*2) + ou)),
+    (fun x y -> (((x/2)*4) + (y*w*2) + ov)) 
+
+  let oy, ou, ov = 
+    if      !Cfg.format = Sdl.Pixel.format_yuy2 then off_pixel_422_packed 0 1 3
+    else if !Cfg.format = Sdl.Pixel.format_uyvy then off_pixel_422_packed 1 0 2
+    else if !Cfg.format = Sdl.Pixel.format_yvyu then off_pixel_422_packed 0 3 1
+    else if !Cfg.format = Sdl.Pixel.format_yv12 then off_pixel_420_planar true
+    else if !Cfg.format = Sdl.Pixel.format_iyuv then off_pixel_420_planar false
+    else failwith "invalid yuv format"
+
+  let copy422_to_yuy2 = 
+    let b = ref None in
+    fun f ->
+      let t = get_buffer f b in
+      let width, height = !Cfg.width, !Cfg.height in
+      for y=0 to height-1 do
+        let h = width * y in
+        for x=0 to width - 1 do
+          t.{(h*2) + (x*2)} <- f.{h + x}
+        done
+      done;
+      let c = width * height in
+      for y=0 to height-1 do
+        let h = width / 2 * y in
+        for x=0 to width/2 - 1 do
+          t.{(h*4) + (x*4) + 1} <- f.{c + h + x}
+        done
+      done;
+      let c = c + (width * height / 2) in
+      for y=0 to height-1 do
+        let h = width / 2 * y in
+        for x=0 to width/2 - 1 do
+          t.{(h*4) + (x*4) + 3} <- f.{c + h + x}
+        done
+      done;
+      t
+
+  let draw_plane = 
+    let b = ref None in
+    fun f ->
+      let t = get_buffer f b in
+      let loop f = 
+        loop 0 (!Cfg.width-1) 1 (fun x ->
+          loop 0 (!Cfg.height-1) 1 (fun y ->
+            let oy, ou, ov = oy x y, ou x y, ov x y in
+            let vy, vu, vv = f oy ou ov in
+            t.{ oy } <- vy;
+            t.{ ou } <- vu;
+            t.{ ov } <- vv
+          )
+        )
+      in
+      (match !Cfg.show_plane with
+      | All -> ()
+      | Y -> loop (fun oy ou ov -> f.{oy}, 128, 128)
+      | U -> loop (fun oy ou ov -> 256, f.{ou}, 128)
+      | V -> loop (fun oy ou ov -> 256, 128, f.{ov}));
+      t
+
+  let draw_diff = 
+    let b = ref None in
+    fun f1 (f2:ba) ->
+      let t = get_buffer f1 b in
+      loop 0 (!Cfg.width-1) 1 (fun x ->
+        loop 0 (!Cfg.height-1) 1 (fun y ->
+          let oy, ou, ov = oy x y, ou x y, ov x y in
+          t.{ oy } <- abs (f1.{oy} - f2.{oy});
+          t.{ ou } <- ((f1.{oy} - f2.{oy})/2) + 128;
+          t.{ ov } <- ((f1.{oy} - f2.{oy})/2) + 128
+        )
+      );
+      t
+
+  let draw_exact_diff = 
+    let b = ref None in
+    fun f1 (f2:ba) ->
+      let size = Bigarray.Array1.dim f1 in
+      let t = get_buffer f1 b in
+      for i=0 to size-1 do
+        t.{i} <- if (f1.{i} <> f2.{i}) then 255 else 0
+      done;
+      loop 0 (!Cfg.width-1) 1 (fun x ->
+        loop 0 (!Cfg.height-1) 1 (fun y ->
+          let oy, ou, ov = oy x y, ou x y, ov x y in
+          t.{ oy } <- if f1.{oy} <> f2.{oy} ||
+                         f1.{ou} <> f2.{ou} ||
+                         f1.{ov} <> f2.{ov} then 255 else 0;
+          t.{ ou } <- 128;
+          t.{ ov } <- 128
+        )
+      );
+      t
+
+  let draw_grid =
+    let b = ref None in
+    fun f ->
+      let t = get_buffer f b in
+      Bigarray.Array1.blit f t;
+      loop 16 (!Cfg.width-1) 16 (fun x ->
+        loop 0 (!Cfg.height-1) 1 (fun y ->
+          t.{ oy x y } <- 255;
+          t.{ ou x y } <- 128;
+          t.{ ov x y } <- 128
+        )
+      );
+      loop 16 (!Cfg.height-1) 16 (fun y ->
+        loop 0 (!Cfg.width-1) 1 (fun x ->
+          t.{ oy x y } <- 255;
+          t.{ ou x y } <- 128;
+          t.{ ov x y } <- 128
+        )
+      );
+      t
+
+  let run f1 f2 = 
+    (* convert 422 to yuy2 *)
+    let f1, f2 = 
+      match !Cfg.auto422,f2 with
+      | true,Some(f2) -> copy422_to_yuy2 f1, Some(copy422_to_yuy2 f2) 
+      | true,None -> copy422_to_yuy2 f1, None
+      | _ -> f1, f2
+    in
+    (* select plane *)
+    let f1, f2 = 
+      match !Cfg.show_plane, f2 with
+      | All,_ -> f1, f2 
+      | _,Some(f2) -> draw_plane f1, Some(draw_plane f2)
+      | _,None -> draw_plane f1, None
+    in
+    (* difference *)
+    let f = 
+      match f2 with 
+      | None -> f1  
+      | Some(f2) -> begin
+        match !Cfg.diff_mode with
+        | NoDiff -> f1
+        | OtherFile -> f2
+        | Diff -> draw_diff f1 f2 
+        | ExactDiff -> draw_exact_diff f1 f2 
+      end
+    in
+    (* grid *)
+    let f = if !Cfg.grid then draw_grid f else f in
+    f
+
+end
 
 (* app main loop *)
 let main () = 
@@ -222,10 +403,6 @@ let main () =
   in
 
   try
-
-    (* parse commandline *)
-    Arg.parse Arg.args;
-    print_opts ();
 
     (* sdl setup *)
     let () = create_resource (Sdl.init Sdl.Init.video) Sdl.quit in
@@ -252,7 +429,7 @@ let main () =
 
     (* open file(s) *)
     let fin = FileIO.open_file_or_stdin !Cfg.in_file in
-    (*let fref = FileIO.open_file_or_none !Cfg.diff_file in*)
+    let fref = FileIO.open_file_or_none !Cfg.diff_file in
 
     let total_frames = 
       match fin with
@@ -287,6 +464,9 @@ let main () =
       else if key = left then (play := false; set_frame_no (get_frame_no()-1); redraw := true)
       else if key = home || key = k0 then (play := false; set_frame_no 0; redraw := true)
       else if key = kend then (play := false; set_frame_no (total_frames-1); redraw := true)
+      else if key = g then (Cfg.grid := not !Cfg.grid; redraw := true)
+      else if key = d then (Cfg.diff_mode := next_diff_mode !Cfg.diff_mode; redraw := true)
+      else if key = y then (Cfg.show_plane := next_plane_mode !Cfg.show_plane; redraw := true)
       else begin
         let num = 
           if key = k1 then 1
@@ -313,7 +493,9 @@ let main () =
 
     let display_frame frame_no = 
       if !redraw then begin
-        let b = FileIO.read_file fin frame_no in
+        let b1 = FileIO.read_file fin frame_no in
+        let b2 = FileIO.read_file_opt fref frame_no in
+        let b = Transform.run b1 b2 in
         ignore (Sdl.update_texture display None b 
                   (if is_planar then !Cfg.width else !Cfg.width*2));
         ignore (Sdl.render_copy renderer display);
