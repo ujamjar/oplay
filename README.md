@@ -20,7 +20,7 @@ oplay [options] [in_file]
 Sizes are specified with a string like `640x480` or an identifer 
 like `qcif`, `vga`, `720p`(see stdsizes.ml for all supported).
 
-The format is one of `yuy2, `uyvy`, `yvyu`, `yv12`, `iyuv`, `420`.
+The format is one of `yuy2`, `uyvy`, `yvyu`, `yv12`, `iyuv`, `420`.
 
 ### Keys
 
@@ -29,7 +29,7 @@ The format is one of `yuy2, `uyvy`, `yvyu`, `yv12`, `iyuv`, `420`.
 * `tab` toggle full screen
 * `right`, `left` step one frame forward/backward
 * `home`, `end` go to first/last frame
-* `1`-`9` go `n`*10% into the file
+* `1`-`9` go `n`\*10% into the file
 
 ### TODO
 
