@@ -398,8 +398,8 @@ let main () =
   let do_cleanup () = List.iter (fun f -> f()) !cleanup in
   let create_resource f c = 
     match f with
-    | `Ok a -> (cleanup := (fun () -> c a) :: !cleanup; a)
-    | `Error e -> (do_cleanup (); failwith "resource allocation")
+    | Result.Ok a -> (cleanup := (fun () -> c a) :: !cleanup; a)
+    | Result.Error (`Msg e) -> (do_cleanup (); failwith "resource allocation")
   in
 
   try
